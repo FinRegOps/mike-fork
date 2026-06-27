@@ -9,6 +9,18 @@ import Link from "next/link";
 import { SiteLogo } from "@/components/site-logo";
 import { CheckCircle2 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import { updateUserProfile } from "@/app/lib/mikeApi";
+
+const authGlassCardClassName =
+    "rounded-2xl border border-white/70 bg-white/72 p-8 shadow-[0_4px_14px_rgba(15,23,42,0.045),inset_0_1px_0_rgba(255,255,255,0.86),inset_0_-8px_18px_rgba(255,255,255,0.12)] backdrop-blur-2xl";
+const authInputClassName =
+    "rounded-lg border border-transparent bg-gray-100 px-3 shadow-none focus-visible:border-gray-200 focus-visible:ring-2 focus-visible:ring-gray-300/45";
+const authToggleClassName =
+    "flex gap-1 rounded-full bg-gray-200 p-1 text-xs font-medium";
+const authToggleActiveClassName =
+    "inline-flex h-6 items-center rounded-full border border-white/80 bg-white/86 px-3 text-gray-900 shadow-[0_2px_7px_rgba(15,23,42,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_-3px_7px_rgba(229,231,235,0.32)] backdrop-blur-xl";
+const authToggleInactiveClassName =
+    "inline-flex h-6 items-center rounded-full border border-transparent px-3 text-gray-500 transition-colors hover:bg-white/38 hover:text-gray-900";
 
 export default function SignupPage() {
     const router = useRouter();
@@ -59,19 +71,12 @@ export default function SignupPage() {
                 const trimmedName = name.trim();
                 const trimmedOrg = organisation.trim();
                 if (trimmedName || trimmedOrg) {
-                    // The handle_new_user DB trigger creates the
-                    // user_profiles row synchronously on auth.users insert,
-                    // so we UPDATE rather than upsert — RLS permits update
-                    // of the user's own row but blocks self-INSERT.
-                    const { error: profileError } = await supabase
-                        .from("user_profiles")
-                        .update({
-                            ...(trimmedName && { display_name: trimmedName }),
+                    try {
+                        await updateUserProfile({
+                            ...(trimmedName && { displayName: trimmedName }),
                             ...(trimmedOrg && { organisation: trimmedOrg }),
-                            updated_at: new Date().toISOString(),
-                        })
-                        .eq("user_id", data.session.user.id);
-                    if (profileError) {
+                        });
+                    } catch (profileError) {
                         console.error(
                             "[signup] failed to persist profile fields",
                             profileError,
@@ -83,8 +88,12 @@ export default function SignupPage() {
             setTimeout(() => {
                 router.push("/assistant");
             }, 2000);
-        } catch (error: any) {
-            setError(error.message || "An error occurred during signup");
+        } catch (error: unknown) {
+            setError(
+                error instanceof Error
+                    ? error.message
+                    : "An error occurred during signup",
+            );
         } finally {
             setLoading(false);
         }
@@ -93,16 +102,18 @@ export default function SignupPage() {
     // Success View
     if (success) {
         return (
-            <div className="min-h-dvh bg-white flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+            <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
                 <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
-                    <SiteLogo size="md" className="md:text-4xl" asLink />
+                    <SiteLogo size="lg" asLink />
                 </div>
                 <div className="w-full max-w-md">
-                    <div className="bg-white border border-gray-200 rounded-2xl p-10 text-center shadow-sm">
+                    <div
+                        className={`${authGlassCardClassName} p-10 text-center`}
+                    >
                         <div className="mx-auto w-12 h-12 bg-green-50 rounded-full flex items-center justify-center mb-6">
                             <CheckCircle2 className="h-6 w-6 text-green-600" />
                         </div>
-                        <h2 className="text-2xl font-semibold text-gray-900 mb-3">
+                        <h2 className="text-2xl font-bold text-gray-950 mb-3">
                             Account created!
                         </h2>
                         <p className="text-gray-600 leading-relaxed">
@@ -116,24 +127,24 @@ export default function SignupPage() {
 
     // Default Signup Form View
     return (
-        <div className="min-h-dvh bg-white flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
+        <div className="min-h-dvh bg-gray-50/80 flex items-start justify-center px-6 pt-32 md:pt-40 pb-10 relative">
             <div className="absolute top-4 md:top-8 left-1/2 -translate-x-1/2">
-                <SiteLogo size="md" className="md:text-4xl" asLink />
+                <SiteLogo size="lg" asLink />
             </div>
             <div className="w-full max-w-md">
-                <div className="bg-white border border-gray-200 rounded-2xl p-8">
+                <div className={`${authGlassCardClassName} mb-4`}>
                     <div className="flex justify-between items-center mb-6">
-                        <h2 className="text-left text-2xl font-serif">
+                        <h2 className="text-left text-2xl font-medium font-serif text-gray-950">
                             Create Account
                         </h2>
-                        <div className="bg-gray-100 p-1 rounded-md flex text-xs font-medium">
+                        <div className={authToggleClassName}>
                             <Link
                                 href="/login"
-                                className="px-3 py-1 text-gray-500 hover:text-gray-900"
+                                className={authToggleInactiveClassName}
                             >
                                 Log in
                             </Link>
-                            <span className="px-3 py-1 bg-white rounded-sm shadow-sm text-gray-900">
+                            <span className={authToggleActiveClassName}>
                                 Sign up
                             </span>
                         </div>
@@ -156,7 +167,7 @@ export default function SignupPage() {
                                 value={name}
                                 onChange={(e) => setName(e.target.value)}
                                 placeholder="Your name"
-                                className="w-full"
+                                className={`w-full ${authInputClassName}`}
                             />
                         </div>
 
@@ -178,7 +189,7 @@ export default function SignupPage() {
                                     setOrganisation(e.target.value)
                                 }
                                 placeholder="Your organisation"
-                                className="w-full"
+                                className={`w-full ${authInputClassName}`}
                             />
                         </div>
 
@@ -196,7 +207,7 @@ export default function SignupPage() {
                                 onChange={(e) => setEmail(e.target.value)}
                                 placeholder="Enter your email"
                                 required
-                                className="w-full"
+                                className={`w-full ${authInputClassName}`}
                             />
                         </div>
 
@@ -214,7 +225,7 @@ export default function SignupPage() {
                                 onChange={(e) => setPassword(e.target.value)}
                                 placeholder="Create a password (min. 6 characters)"
                                 required
-                                className="w-full"
+                                className={`w-full ${authInputClassName}`}
                             />
                         </div>
 
@@ -234,7 +245,7 @@ export default function SignupPage() {
                                 }
                                 placeholder="Confirm your password"
                                 required
-                                className="w-full"
+                                className={`w-full ${authInputClassName}`}
                             />
                         </div>
 

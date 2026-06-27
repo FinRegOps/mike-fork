@@ -8,8 +8,17 @@ import React, {
     ReactNode,
     useCallback,
 } from "react";
-import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/contexts/AuthContext";
+import {
+    type ApiKeyState,
+    type ApiKeyProvider,
+    type UserProfile as ApiUserProfile,
+    getUserProfile,
+    isMfaRequiredError,
+    saveApiKey,
+    updateUserMfaOnLogin,
+    updateUserProfile,
+} from "@/app/lib/mikeApi";
 
 interface UserProfile {
     displayName: string | null;
@@ -18,9 +27,11 @@ interface UserProfile {
     creditsResetDate: string;
     creditsRemaining: number;
     tier: string;
+    titleModel: string;
     tabularModel: string;
-    claudeApiKey: string | null;
-    geminiApiKey: string | null;
+    mfaOnLogin: boolean;
+    legalResearchUs: boolean;
+    apiKeys: ApiKeyState;
 }
 
 interface UserProfileContextType {
@@ -29,11 +40,13 @@ interface UserProfileContextType {
     updateDisplayName: (name: string) => Promise<boolean>;
     updateOrganisation: (organisation: string) => Promise<boolean>;
     updateModelPreference: (
-        field: "tabularModel",
+        field: "titleModel" | "tabularModel",
         value: string,
     ) => Promise<boolean>;
+    updateMfaOnLogin: (enabled: boolean) => Promise<boolean>;
+    updateLegalResearchUs: (enabled: boolean) => Promise<boolean>;
     updateApiKey: (
-        provider: "claude" | "gemini",
+        provider: ApiKeyProvider,
         value: string | null,
     ) => Promise<boolean>;
     reloadProfile: () => Promise<void>;
@@ -44,95 +57,54 @@ const UserProfileContext = createContext<UserProfileContextType | undefined>(
     undefined,
 );
 
+const API_KEY_PROVIDERS: ApiKeyProvider[] = [
+    "claude",
+    "gemini",
+    "openai",
+    "openrouter",
+    "courtlistener",
+];
+
+function emptyApiKeys(): ApiKeyState {
+    return {
+        claude: { configured: false, source: null },
+        gemini: { configured: false, source: null },
+        openai: { configured: false, source: null },
+        openrouter: { configured: false, source: null },
+        courtlistener: { configured: false, source: null },
+    };
+}
+
+function toProfile(data: ApiUserProfile): UserProfile {
+    const { apiKeyStatus, ...profile } = data;
+    const apiKeys = emptyApiKeys();
+    for (const provider of API_KEY_PROVIDERS) {
+        apiKeys[provider] = {
+            configured: !!apiKeyStatus[provider],
+            source:
+                apiKeyStatus.sources?.[provider] ??
+                (apiKeyStatus[provider] ? "user" : null),
+        };
+    }
+
+    return {
+        ...profile,
+        mfaOnLogin: profile.mfaOnLogin === true,
+        apiKeys,
+    };
+}
+
 export function UserProfileProvider({ children }: { children: ReactNode }) {
     const { user, isAuthenticated } = useAuth();
     const [profile, setProfile] = useState<UserProfile | null>(null);
     const [loading, setLoading] = useState(true);
+    const userId = user?.id ?? null;
 
-    const loadProfile = useCallback(async (userId: string) => {
+    const loadProfile = useCallback(async () => {
         try {
-            const { data, error } = await supabase
-                .from("user_profiles")
-                .select("*")
-                .eq("user_id", userId)
-                .single();
-
-            // Define credit limit constant
-            const MONTHLY_CREDIT_LIMIT = 999999; // temporarily unlimited
-
-            // Calculate a default future reset date (30 days from now)
-            const futureResetDate = new Date();
-            futureResetDate.setDate(futureResetDate.getDate() + 30);
-            const defaultResetDateStr = futureResetDate.toISOString();
-
-            if (error) {
-                // Set fallback profile data if profile doesn't exist
-                setProfile({
-                    displayName: null,
-                    organisation: null,
-                    messageCreditsUsed: 0,
-                    creditsResetDate: defaultResetDateStr,
-                    creditsRemaining: MONTHLY_CREDIT_LIMIT,
-                    tier: "Free",
-                    tabularModel: "gemini-3-flash-preview",
-                    claudeApiKey: null,
-                    geminiApiKey: null,
-                });
-                return;
-            }
-
-            // Use fetched data to update profile state
-            if (data) {
-                let creditsUsed = data.message_credits_used;
-                let resetDate = data.credits_reset_date;
-                let creditsRemaining = MONTHLY_CREDIT_LIMIT - creditsUsed;
-                let shouldUpdateDb = false;
-
-                // Check if credits have expired and need reset
-                if (resetDate && new Date() > new Date(resetDate)) {
-                    // Calculate new reset date
-                    const newResetDate = new Date();
-                    newResetDate.setDate(newResetDate.getDate() + 30);
-                    resetDate = newResetDate.toISOString();
-                    creditsUsed = 0;
-                    creditsRemaining = MONTHLY_CREDIT_LIMIT;
-                    shouldUpdateDb = true;
-                }
-
-                // 1. Update local state immediately
-                setProfile({
-                    displayName: data.display_name,
-                    organisation: data.organisation ?? null,
-                    messageCreditsUsed: creditsUsed,
-                    creditsResetDate: resetDate,
-                    creditsRemaining: creditsRemaining,
-                    tier: data.tier || "Free",
-                    tabularModel:
-                        data.tabular_model || "gemini-3-flash-preview",
-                    claudeApiKey: data.claude_api_key ?? null,
-                    geminiApiKey: data.gemini_api_key ?? null,
-                });
-
-                // 2. Update database in background if needed
-                if (shouldUpdateDb) {
-                    supabase
-                        .from("user_profiles")
-                        .update({
-                            message_credits_used: 0,
-                            credits_reset_date: resetDate,
-                            updated_at: new Date().toISOString(),
-                        })
-                        .eq("user_id", userId)
-                        .then(({ error }) => {
-                            if (error)
-                                console.error(
-                                    "Failed to auto-reset credits",
-                                    error,
-                                );
-                        });
-                }
-            }
-        } catch (e) {
+            const profileData = await getUserProfile();
+            setProfile(toProfile(profileData));
+        } catch {
             // Calculate a default future reset date for fallback
             const futureResetDate = new Date();
             futureResetDate.setDate(futureResetDate.getDate() + 30);
@@ -145,9 +117,11 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 creditsResetDate: futureResetDate.toISOString(),
                 creditsRemaining: 999999, // temporarily unlimited
                 tier: "Free",
+                titleModel: "gemini-3.1-flash-lite-preview",
                 tabularModel: "gemini-3-flash-preview",
-                claudeApiKey: null,
-                geminiApiKey: null,
+                mfaOnLogin: false,
+                legalResearchUs: true,
+                apiKeys: emptyApiKeys(),
             });
         } finally {
             setLoading(false);
@@ -155,14 +129,14 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
     }, []);
 
     useEffect(() => {
-        if (isAuthenticated && user) {
+        if (isAuthenticated && userId) {
             setLoading(true);
-            loadProfile(user.id);
+            loadProfile();
         } else {
             setProfile(null);
             setLoading(false);
         }
-    }, [isAuthenticated, user, loadProfile]);
+    }, [isAuthenticated, userId, loadProfile]);
 
     const updateDisplayName = useCallback(
         async (displayName: string): Promise<boolean> => {
@@ -171,19 +145,10 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
             }
 
             try {
-                const { error } = await supabase
-                    .from("user_profiles")
-                    .update({
-                        display_name: displayName,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("user_id", user.id);
-
-                if (error) {
-                    throw error;
-                }
-
-                setProfile((prev) => (prev ? { ...prev, displayName } : null));
+                const updated = await updateUserProfile({ displayName });
+                setProfile((prev) =>
+                    prev ? { ...prev, ...toProfile(updated) } : null,
+                );
                 return true;
             } catch {
                 return false;
@@ -196,16 +161,31 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
         async (organisation: string): Promise<boolean> => {
             if (!user) return false;
             try {
-                const { error } = await supabase
-                    .from("user_profiles")
-                    .update({
-                        organisation,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("user_id", user.id);
-                if (error) throw error;
+                const updated = await updateUserProfile({ organisation });
                 setProfile((prev) =>
-                    prev ? { ...prev, organisation } : null,
+                    prev ? { ...prev, ...toProfile(updated) } : null,
+                );
+                return true;
+            } catch (error) {
+                if (isMfaRequiredError(error)) throw error;
+                return false;
+            }
+        },
+        [user],
+    );
+
+    const updateModelPreference = useCallback(
+        async (
+            field: "titleModel" | "tabularModel",
+            value: string,
+        ): Promise<boolean> => {
+            if (!user) return false;
+            try {
+                const updated = await updateUserProfile({
+                    [field]: value,
+                });
+                setProfile((prev) =>
+                    prev ? { ...prev, ...toProfile(updated) } : null,
                 );
                 return true;
             } catch {
@@ -215,25 +195,32 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
         [user],
     );
 
-    const updateModelPreference = useCallback(
-        async (
-            field: "tabularModel",
-            value: string,
-        ): Promise<boolean> => {
+    const updateMfaOnLogin = useCallback(
+        async (enabled: boolean): Promise<boolean> => {
             if (!user) return false;
-            const dbField = field === "tabularModel" ? "tabular_model" : "";
-            if (!dbField) return false;
             try {
-                const { error } = await supabase
-                    .from("user_profiles")
-                    .update({
-                        [dbField]: value,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("user_id", user.id);
-                if (error) throw error;
+                const updated = await updateUserMfaOnLogin(enabled);
                 setProfile((prev) =>
-                    prev ? { ...prev, [field]: value } : null,
+                    prev ? { ...prev, ...toProfile(updated) } : null,
+                );
+                return true;
+            } catch (error) {
+                if (isMfaRequiredError(error)) throw error;
+                return false;
+            }
+        },
+        [user],
+    );
+
+    const updateLegalResearchUs = useCallback(
+        async (enabled: boolean): Promise<boolean> => {
+            if (!user) return false;
+            try {
+                const updated = await updateUserProfile({
+                    legalResearchUs: enabled,
+                });
+                setProfile((prev) =>
+                    prev ? { ...prev, ...toProfile(updated) } : null,
                 );
                 return true;
             } catch {
@@ -245,29 +232,30 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
 
     const updateApiKey = useCallback(
         async (
-            provider: "claude" | "gemini",
+            provider: ApiKeyProvider,
             value: string | null,
         ): Promise<boolean> => {
             if (!user) return false;
-            const dbField =
-                provider === "claude" ? "claude_api_key" : "gemini_api_key";
-            const stateField =
-                provider === "claude" ? "claudeApiKey" : "geminiApiKey";
             const normalized = value?.trim() ? value.trim() : null;
             try {
-                const { error } = await supabase
-                    .from("user_profiles")
-                    .update({
-                        [dbField]: normalized,
-                        updated_at: new Date().toISOString(),
-                    })
-                    .eq("user_id", user.id);
-                if (error) throw error;
+                await saveApiKey(provider, normalized);
                 setProfile((prev) =>
-                    prev ? { ...prev, [stateField]: normalized } : null,
+                    prev
+                        ? {
+                              ...prev,
+                              apiKeys: {
+                                  ...prev.apiKeys,
+                                  [provider]: {
+                                      configured: !!normalized,
+                                      source: normalized ? "user" : null,
+                                  },
+                              },
+                          }
+                        : null,
                 );
                 return true;
-            } catch {
+            } catch (error) {
+                if (isMfaRequiredError(error)) throw error;
                 return false;
             }
         },
@@ -275,10 +263,10 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
     );
 
     const reloadProfile = useCallback(async () => {
-        if (user) {
-            await loadProfile(user.id);
+        if (userId) {
+            await loadProfile();
         }
-    }, [user, loadProfile]);
+    }, [userId, loadProfile]);
 
     const incrementMessageCredits = useCallback(async (): Promise<boolean> => {
         if (!user || !profile) {
@@ -290,36 +278,7 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
             return false;
         }
 
-        try {
-            const newCreditsUsed = profile.messageCreditsUsed + 1;
-
-            const { error } = await supabase
-                .from("user_profiles")
-                .update({
-                    message_credits_used: newCreditsUsed,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq("user_id", user.id);
-
-            if (error) {
-                throw error;
-            }
-
-            // Update local state
-            setProfile((prev) =>
-                prev
-                    ? {
-                          ...prev,
-                          messageCreditsUsed: newCreditsUsed,
-                          creditsRemaining: 999999 - newCreditsUsed, // temporarily unlimited
-                      }
-                    : null,
-            );
-
-            return true;
-        } catch (err) {
-            return false;
-        }
+        return false;
     }, [user, profile]);
 
     return (
@@ -330,6 +289,8 @@ export function UserProfileProvider({ children }: { children: ReactNode }) {
                 updateDisplayName,
                 updateOrganisation,
                 updateModelPreference,
+                updateMfaOnLogin,
+                updateLegalResearchUs,
                 updateApiKey,
                 reloadProfile,
                 incrementMessageCredits,
